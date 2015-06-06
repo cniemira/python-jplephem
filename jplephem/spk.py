@@ -6,6 +6,7 @@ http://naif.jpl.nasa.gov/pub/naif/toolkit_docs/FORTRAN/req/spk.html
 from numpy import array, empty, empty_like, rollaxis
 from .daf import DAF
 from .names import target_names
+from .spke import spke
 
 T0 = 2451545.0
 S_PER_DAY = 86400.0
@@ -112,29 +113,6 @@ class Segment(object):
         """Compute components and differentials for time `tdb` plus `tdb2`."""
         return tuple(self.generate(tdb, tdb2))
 
-    def _load(self):
-        """Map the coefficients into memory using a NumPy array.
-
-        """
-        if self.data_type == 2:
-            component_count = 3
-        elif self.data_type == 3:
-            component_count = 6
-        else:
-            raise ValueError('only SPK data types 2 and 3 are supported')
-
-        init, intlen, rsize, n = self.daf.map_array(self.end_i - 3, self.end_i)
-        initial_epoch = jd(init)
-        interval_length = intlen / S_PER_DAY
-        coefficient_count = int(rsize - 2) // component_count
-        coefficients = self.daf.map_array(self.start_i, self.end_i - 4)
-
-        coefficients.shape = (int(n), rsize)
-        coefficients = coefficients[:,2:]  # ignore MID and RADIUS elements
-        coefficients.shape = (int(n), component_count, coefficient_count)
-        coefficients = rollaxis(coefficients, 1)
-        return initial_epoch, interval_length, coefficients
-
     def generate(self, tdb, tdb2):
         """Generate components and differentials for time `tdb` plus `tdb2`.
 
@@ -150,61 +128,11 @@ class Segment(object):
         if scalar:
             tdb = array((tdb,))
 
-        try:
-            initial_epoch, interval_length, coefficients = self._data
-        except AttributeError:
-            self._data = self._load()
-            initial_epoch, interval_length, coefficients = self._data
+        if not hasattr(self, '_data'):
+            self._data = spke(self, tdb, tdb2)
 
-        component_count, n, coefficient_count = coefficients.shape
-
-        # Subtracting tdb before adding tdb2 affords greater precision.
-        index, offset = divmod((tdb - initial_epoch) + tdb2, interval_length)
-        index = index.astype(int)
-
-        if (index < 0).any() or (index > n).any():
-            final_epoch = initial_epoch + interval_length * n
-            raise ValueError('segment only covers dates %.1f through %.1f'
-                            % (initial_epoch, final_epoch))
-
-        omegas = (index == n)
-        index[omegas] -= 1
-        offset[omegas] += interval_length
-
-        coefficients = coefficients[:,index]
-
-        # Chebyshev polynomial.
-
-        T = empty((coefficient_count, len(index)))
-        T[0] = 1.0
-        T[1] = t1 = 2.0 * offset / interval_length - 1.0
-        twot1 = t1 + t1
-        for i in range(2, coefficient_count):
-            T[i] = twot1 * T[i-1] - T[i-2]
-
-        components = (T.T * coefficients).sum(axis=2)
-        if scalar:
-            components = components[:,0]
-
-        yield components
-
-        # Chebyshev differentiation.
-
-        dT = empty_like(T)
-        dT[0] = 0.0
-        dT[1] = 1.0
-        if coefficient_count > 2:
-            dT[2] = twot1 + twot1
-            for i in range(3, coefficient_count):
-                dT[i] = twot1 * dT[i-1] - dT[i-2] + T[i-1] + T[i-1]
-        dT *= 2.0
-        dT /= interval_length
-
-        rates = (dT.T * coefficients).sum(axis=2)
-        if scalar:
-            rates = rates[:,0]
-
-        yield rates
+        x = self._data.generate()
+        return x
 
 
 def titlecase(name):
